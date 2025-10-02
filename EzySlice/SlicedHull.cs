@@ -12,7 +12,19 @@ namespace EzySlice {
         private Mesh upper_hull;
         private Mesh lower_hull;
 
-        public SlicedHull(Mesh upperHull, Mesh lowerHull) {
+		public SlicedHull(bool useUpper, bool useLower) {
+			if (useUpper) {
+				upper_hull = new Mesh();
+				upper_hull.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+			}
+
+			if (useLower) {
+				lower_hull = new Mesh();
+				lower_hull.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+			}
+		}
+
+		public SlicedHull(Mesh upperHull, Mesh lowerHull) {
             this.upper_hull = upperHull;
             this.lower_hull = lowerHull;
         }

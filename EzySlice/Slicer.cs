@@ -122,33 +122,57 @@ namespace EzySlice {
             return Slice(mesh, pl, crossRegion, crossIndex);
         }
 
-        /**
+		/**
+		* Slice the gameobject mesh (if any) using the Plane, which will generate
+		* a maximum of 2 other Meshes.
+		* This function will recalculate new UV coordinates to ensure textures are applied
+		* properly.
+		* Returns null if no intersection has been found or the GameObject does not contain
+		* a valid mesh to cut.
+		* The overload that takes a SlicerSourceMesh because it will generate fewer allocations
+		* allocations if that object is re-used.
+		*/
+		public static SlicedHull Slice(Mesh sharedMesh, Plane pl, TextureRegion region, int crossIndex)
+		{
+			if (sharedMesh == null)
+			{
+				return null;
+			}
+
+			SlicerSourceMesh sourceMesh = new SlicerSourceMesh(sharedMesh);
+			return Slice(sourceMesh, pl, region, crossIndex);
+		}
+
+		/**
          * Slice the gameobject mesh (if any) using the Plane, which will generate
          * a maximum of 2 other Meshes.
          * This function will recalculate new UV coordinates to ensure textures are applied
          * properly.
          * Returns null if no intersection has been found or the GameObject does not contain
          * a valid mesh to cut.
+         * If an existing SlicedHull buffer is passed, the Mesh objects in it will be re-used.
          */
-        public static SlicedHull Slice(Mesh sharedMesh, Plane pl, TextureRegion region, int crossIndex) {
-            if (sharedMesh == null) {
+		public static SlicedHull Slice(SlicerSourceMesh sourceMesh, Plane pl, TextureRegion region, int crossIndex, SlicedHull buffer = null) {
+            if (sourceMesh == null) {
                 return null;
             }
 
-            Vector3[] verts = sharedMesh.vertices;
-            Vector2[] uv = sharedMesh.uv;
-            Vector3[] norm = sharedMesh.normals;
-            Vector4[] tan = sharedMesh.tangents;
+			sourceMesh.ResetBuffers();
 
-            int submeshCount = sharedMesh.subMeshCount;
+            Vector3[] verts = sourceMesh.vertices;
+            Vector2[] uv = sourceMesh.uv;
+            Vector3[] norm = sourceMesh.normals;
+            Vector4[] tan = sourceMesh.tangents;
+
+            int submeshCount = sourceMesh.mesh.subMeshCount;
 
             // each submesh will be sliced and placed in its own array structure
-            SlicedSubmesh[] slices = new SlicedSubmesh[submeshCount];
+            SlicedSubmesh[] slices = sourceMesh.slices;
             // the cross section hull is common across all submeshes
-            List<Vector3> crossHull = new List<Vector3>();
+            List<Vector3> crossHull = sourceMesh.crossHull;
 
             // we reuse this object for all intersection tests
-            IntersectionResult result = new IntersectionResult();
+            IntersectionResult result = sourceMesh.intersectionResult;
 
             // see if we would like to split the mesh using uv, normals and tangents
             bool genUV = verts.Length == uv.Length;
@@ -158,10 +182,10 @@ namespace EzySlice {
             // iterate over all the submeshes individually. vertices and indices
             // are all shared within the submesh
             for (int submesh = 0; submesh < submeshCount; submesh++) {
-                int[] indices = sharedMesh.GetTriangles(submesh);
+                int[] indices = sourceMesh.submeshTriangles[submesh];
                 int indicesCount = indices.Length;
 
-                SlicedSubmesh mesh = new SlicedSubmesh();
+                SlicedSubmesh mesh = slices[submesh];
 
                 // loop through all the mesh vertices, generating upper and lower hulls
                 // and all intersection points
@@ -235,17 +259,20 @@ namespace EzySlice {
                         }
                     }
                 }
-
-                // register into the index
-                slices[submesh] = mesh;
             }
+
+			if (buffer == null)
+			{
+				buffer = new SlicedHull(true, true);
+			}
 
             // check if slicing actually occured
             for (int i = 0; i < slices.Length; i++) {
                 // check if at least one of the submeshes was sliced. If so, stop checking
                 // because we need to go through the generation step
                 if (slices[i] != null && slices[i].isValid) {
-                    return CreateFrom(slices, CreateFrom(crossHull, pl.normal, region), crossIndex);
+                    CreateFrom(slices, CreateFrom(crossHull, pl.normal, region), crossIndex, buffer);
+					return buffer;
                 }
             }
 
@@ -256,7 +283,7 @@ namespace EzySlice {
         /**
          * Generates a single SlicedHull from a set of cut submeshes 
          */
-        private static SlicedHull CreateFrom(SlicedSubmesh[] meshes, List<Triangle> cross, int crossSectionIndex) {
+        private static void CreateFrom(SlicedSubmesh[] meshes, List<Triangle> cross, int crossSectionIndex, SlicedHull buffer) {
             int submeshCount = meshes.Length;
 
             int upperHullCount = 0;
@@ -268,24 +295,28 @@ namespace EzySlice {
                 lowerHullCount += meshes[submesh].lowerHull.Count;
             }
 
-            Mesh upperHull = CreateUpperHull(meshes, upperHullCount, cross, crossSectionIndex);
-            Mesh lowerHull = CreateLowerHull(meshes, lowerHullCount, cross, crossSectionIndex);
-
-            return new SlicedHull(upperHull, lowerHull);
+			if (buffer.upperHull)
+			{
+				CreateUpperHull(meshes, buffer.upperHull, upperHullCount, cross, crossSectionIndex);
+			}
+			if (buffer.lowerHull)
+			{
+				CreateLowerHull(meshes, buffer.lowerHull, lowerHullCount, cross, crossSectionIndex);
+			}
         }
 
-        private static Mesh CreateUpperHull(SlicedSubmesh[] mesh, int total, List<Triangle> crossSection, int crossSectionIndex) {
-            return CreateHull(mesh, total, crossSection, crossSectionIndex, true);
+        private static Mesh CreateUpperHull(SlicedSubmesh[] submeshes, Mesh mesh, int total, List<Triangle> crossSection, int crossSectionIndex) {
+            return CreateHull(submeshes, mesh, total, crossSection, crossSectionIndex, true);
         }
 
-        private static Mesh CreateLowerHull(SlicedSubmesh[] mesh, int total, List<Triangle> crossSection, int crossSectionIndex) {
-            return CreateHull(mesh, total, crossSection, crossSectionIndex, false);
+        private static Mesh CreateLowerHull(SlicedSubmesh[] submeshes, Mesh mesh, int total, List<Triangle> crossSection, int crossSectionIndex) {
+            return CreateHull(submeshes, mesh, total, crossSection, crossSectionIndex, false);
         }
 
         /**
          * Generate a single Mesh HULL of either the UPPER or LOWER hulls. 
          */
-        private static Mesh CreateHull(SlicedSubmesh[] meshes, int total, List<Triangle> crossSection, int crossIndex, bool isUpper) {
+        private static Mesh CreateHull(SlicedSubmesh[] meshes, Mesh newMesh, int total, List<Triangle> crossSection, int crossIndex, bool isUpper) {
             if (total <= 0) {
                 return null;
             }
@@ -293,9 +324,6 @@ namespace EzySlice {
             int submeshCount = meshes.Length;
             int crossCount = crossSection != null ? crossSection.Count : 0;
 
-            Mesh newMesh = new Mesh();
-            newMesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
-            
             int arrayLen = (total + crossCount) * 3;
 
             bool hasUV = meshes[0].hasUV;
@@ -446,7 +474,9 @@ namespace EzySlice {
 
             int totalTriangles = triangles.Count;
 
-            newMesh.subMeshCount = totalTriangles;
+			newMesh.Clear();
+
+			newMesh.subMeshCount = totalTriangles;
             // fill the mesh structure
             newMesh.vertices = newVertices;
 
